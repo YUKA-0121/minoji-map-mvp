@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>旧街道ナビ（MVP）</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css"
+        integrity=" sha256-sA+e2p5yU2c3k0s8b9Y9pP0a4vQ3gZc1k7sZLk0jF2o="
+        crossorigin=""/>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif; background:#f7f7f7; }
+    /* 上部の簡易バー（スマホ向けのシンプルUI） */
+    #topbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: 68px; background: #fff; border-bottom: 1px solid #ddd;
+      display: flex; align-items: center; padding: 6px 8px; z-index: 1000;
+      box-shadow: 0 2px 6px rgba(0,0,0,.08);
+    }
+    #title { font-weight: bold; font-size: 16px; margin-right: 8px; }
+    #searchBox {
+      flex: 1; min-width: 120px; max-width: 480px;
+      padding: 10px; border: 1px solid #ccc; border-radius: 6px;
+    }
+    #searchBtn { margin-left: 6px; padding: 10px 12px; border-radius: 6px; border: 1px solid #ccc; background: #eee; }
+    #locateBtn {
+      position: fixed; bottom: 18px; right: 18px;
+      width: 56px; height: 56px; border-radius: 50%;
+      border: none; background: #2a9d8f; color: white; font-size: 22px;
+      box-shadow: 0 4px 10px rgba(0,0,0,.25); z-index: 1000;
+    }
+    #map { position: fixed; top: 68px; bottom: 0; width: 100%; }
+    .leaflet-control-layers { background: rgba(255,255,255,.92); border-radius: 6px; }
+    /* アクセシビリティ用の簡易カラー設定（デフォルト貫通） */
+    .high-contrast { background: #000!important; color: #fff; }
+    /* 文字サイズ切替用（Rootフォントサイズではなく、UI部の大きさを調整） */
+    .font-sm { font-size: 14px; }
+    .font-md { font-size: 16px; }
+    .font-lg { font-size: 18px; }
+  </style>
+</head>
+<body class="font-md" id="body">
+  <!-- ヘッダ：検索バー -->
+  <div id="topbar" aria-label="地図操作パネル">
+    <div id="title" aria-label="アプリ名">旧街道ナビ（MVP）</div>
+    <form id="searchForm" aria-label="場所検索フォーム" style="display:flex; align-items:center; gap:6px;">
+      <input id="searchBox" type="text" placeholder="場所を検索" aria-label="検索キーワード" />
+      <button id="searchBtn" type="submit" aria-label="検索実行">検索</button>
+    </form>
+    <!-- 追加のアクセシビリティ控え。後で拡張可能 -->
+  </div>
+
+  <!-- 地図エリア -->
+  <div id="map" role="application" aria-label="地図表示エリア"></div>
+
+  <!-- 現在地ボタン -->
+  <button id="locateBtn" aria-label="現在地を表示" title="現在地を表示">📍</button>
+
+  <!-- 文字サイズ調整・コントラスト切替のための簡易UIは現状は省略せず、必要なら以下を追加可能 -->
+  <!-- 例: <button id="fontToggle">A</button> -->
+
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"
+          integrity="sha256-pv1h9K8Gk4v3q8q3oJq1tVY3Q4QO3wQf3l3kJrjF2wY="
+          crossorigin=""></script>
+  <script>
+    // 地図初期化（スマホ中心のミニマム設定）
+    const map = L.map('map', { zoomControl: true }).setView([35.0, 136.8], 6);
+
+    // OpenStreetMap の基本地図レイヤ
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    // 旧街道ルートのサンプル GeoJSON（仮データ）
+    const oldRoadGeo = {
+      "type": "Feature",
+      "properties": { "name": "江戸時代ルート仮データ" },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [136.9064, 35.1369], // 熱田周辺（仮）
+          [136.8, 35.15],
+          [136.6, 35.2],
+          [136.5, 35.25],
+          [135.8, 34.95] // 垂井付近へ向かう想定
+        ]
+      }
+    };
+
+    const oldRoadLayer = L.geoJSON(oldRoadGeo, {
+      style: { color: '#d14', weight: 5, opacity: 0.9, dashArray: '6,6' }
+    }).addTo(map);
+
+    // 見どころのサンプルPOI（初期データ。後で data/pois.geojson に置換可能）
+    const samplePois = [
+      { name: '熱田神宮 一里塚跡', description: '江戸時代の一里塚跡。現在は石碑が残る。', lat: 35.140, lon: 136.90, photo: '' },
+      { name: '宿場跡の碑', description: '美濃路の宿場の名残を示す碑。', lat: 35.18, lon: 136.75, photo: '' },
+      { name: '石碑A', description: '道標の石碑。', lat: 35.22, lon: 136.60, photo: '' }
+    ];
+
+    // POIを地図上に表示
+    function addPOIs(pois) {
+      pois.forEach(p => {
+        const marker = L.marker([p.lat, p.lon], { title: p.name });
+        const popupContent = `<strong>${p.name}</strong><br/>${p.description}` +
+                             (p.photo ? `<br/><img src="${p.photo}" alt="${p.name}" style="max-width:200px; width:100%; height:auto;" />` : '');
+        marker.bindPopup(popupContent);
+        marker.addTo(map);
+      });
+    }
+
+    // 初期データをロード（data/pois.geojson があればそれを使い、無ければサンプルを使う）
+    function loadPois() {
+      // data/pois.geojson から読み込む想定
+      fetch('data/pois.geojson')
+        .then(r => {
+          if (!r.ok) throw new Error('pois.geojson not found');
+          return r.json();
+        })
+        .then(geojson => {
+          // GeoJSON の形式を想定: features[].geometry.type == "Point", features[].geometry.coordinates [lon, lat]
+          if (geojson && geojson.features) {
+            geojson.features.forEach(f => {
+              if (f.geometry && f.geometry.type === 'Point') {
+                const [lon, lat] = f.geometry.coordinates;
+                const name = f.properties?.name || '見どころ';
+                const description = f.properties?.description || '';
+                const photo = f.properties?.photo || '';
+                const marker = L.marker([lat, lon], { title: name });
+                marker.bindPopup(`<strong>${name}</strong><br/>${description}` + (photo ? `<br/><img src="${photo}" alt="${name}" style="max-width:200px; width:100%; height:auto;" />` : ''));
+                marker.addTo(map);
+              }
+            });
+          } else {
+            addPOIs(samplePois);
+          }
+        })
+        .catch(() => {
+          // ファイルがない場合やエラー時はサンプルデータで動作
+          addPOIs(samplePois);
+        });
+    }
+
+    // 初期ロード
+    loadPois();
+
+    // 現在地を表示する機能
+    document.getElementById('locateBtn').addEventListener('click', () => {
+      if (!navigator.geolocation) {
+        alert('この端末は geolocation に対応していません。');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(pos => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        map.setView([lat, lon], 15);
+        L.marker([lat, lon], { title: '現在地' }).addTo(map)
+          .bindPopup('現在地').openPopup();
+      }, err => {
+        alert('現在地を取得できませんでした: ' + err.message);
+      });
+    });
+
+    // 場所検索（Nominatim）
+    document.getElementById('searchForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = document.getElementById('searchBox').value.trim();
+      if (!q) return;
+      fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}`)
+        .then(r => r.json())
+        .then(results => {
+          if (results && results.length > 0) {
+            const r = results[0];
+            const lat = parseFloat(r.lat);
+            const lon = parseFloat(r.lon);
+            map.setView([lat, lon], 16);
+            L.marker([lat, lon]).addTo(map)
+              .bindPopup(r.display_name || q).openPopup();
+          } else {
+            alert('該当する場所が見つかりませんでした。別のキーワードをお試しください。');
+          }
+        })
+        .catch(() => alert('検索中にエラーが発生しました。'));
+    });
+
+    // アクセシビリティ補足
+    // - 文字サイズ切替は現時点はクラス切替で実装可能。必要時追加します。
+    // - コントラスト調整は、UI部分のカラーを高対比モードに切替えるスイッチを後日追加可能です。
+
+  </script>
+</body>
+</html>
